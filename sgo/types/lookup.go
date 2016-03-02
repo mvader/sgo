@@ -279,8 +279,7 @@ func MissingMethod(V Type, T *Interface, static bool) (method *Func, wrongType b
 // It returns (nil, false) as affirmative answer. Otherwise it returns a missing
 // method required by V and whether it is missing or just has the wrong type.
 func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, mustOptional bool) {
-	switch T.Underlying().(type) {
-	case *Pointer, *Map, *Signature, *Chan, *Interface:
+	if typeMustOptional(T.Underlying()) {
 		mustOptional = true
 		return
 	}
@@ -292,6 +291,36 @@ func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, mustOptio
 	}
 	method, wrongType = MissingMethod(T, V, false)
 	return
+}
+
+// typeMustOptional reports whether a type T recursively needs to be wrapped in an optional.
+// If T is Array or Slice, the underlying type will be checked. If T is Optional, it will not
+// need to be wrapped in an optional unless the underlying type is a Map. In that case, further
+// checks are needed for the key and value type of the map.
+func typeMustOptional(T Type) bool {
+	t := T.Underlying()
+	switch t.(type) {
+	case *Pointer, *Map, *Signature, *Chan, *Interface:
+		return true
+	case *Slice, *Array:
+		var underlying Type
+		switch t.(type) {
+		case *Slice:
+			underlying = t.(*Slice).Elem()
+		case *Array:
+			underlying = t.(*Array).Elem()
+		}
+
+		return typeMustOptional(underlying)
+	case *Optional:
+		switch t.(*Optional).Elem().(type) {
+		case *Map:
+			var underlying = t.(*Optional).Elem().(*Map)
+			return typeMustOptional(underlying.Key()) || typeMustOptional(underlying.Elem())
+		}
+	}
+
+	return false
 }
 
 // deref dereferences typ if it is a *Pointer and returns its base and true.
