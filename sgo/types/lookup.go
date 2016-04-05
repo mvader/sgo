@@ -322,27 +322,26 @@ func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, needsOpti
 // checks are needed for the key and value type of the map.
 func mustOptional(T Type) []Type {
 	var needOptional []Type
-	t := T.Underlying()
-	switch t.(type) {
+	switch T.(type) {
 	case *Pointer, *Map, *Signature, *Chan:
 		needOptional = append(needOptional, T)
 	case *Slice, *Array:
 		var underlying Type
-		switch t.(type) {
+		switch T.(type) {
 		case *Slice:
-			underlying = t.(*Slice).Elem()
+			underlying = T.(*Slice).Elem()
 		case *Array:
-			underlying = t.(*Array).Elem()
+			underlying = T.(*Array).Elem()
 		}
 
 		needOptional = append(needOptional, mustOptional(underlying)...)
 	case *Struct:
-		fields := t.(*Struct).fields
+		fields := T.(*Struct).fields
 		for _, f := range fields {
 			needOptional = append(needOptional, mustOptional(f.typ)...)
 		}
 	case *Optional:
-		switch underlying := t.(*Optional).Elem().(type) {
+		switch underlying := T.(*Optional).Elem().(type) {
 		case *Map:
 			needOptional = append(needOptional, mustOptional(underlying.Key())...)
 			needOptional = append(needOptional, mustOptional(underlying.Elem())...)
