@@ -8,13 +8,15 @@ package importer
 import (
 	"fmt"
 	"go/build"
-	"os"
-	"path/filepath"
-
 	goconstant "go/constant"
 	goimporter "go/importer"
 	gotypes "go/types"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/tcard/sgo/sgo/annotations"
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/constant"
 	"github.com/tcard/sgo/sgo/parser"
@@ -25,19 +27,91 @@ import (
 // Default returns a types.Importer that imports from Go source code and
 // transforms to SGo.
 //
-// Conversion is performed by passing the AST through ConvertAST.
-func Default() types.Importer {
-	return &importer{}
+// For packages imported from any of the passed files, conversion is performed
+// by passing the AST through ConvertAST. The packages that imported packages
+// import themselves are imported by the default go/importer, without
+// transformation to SGo at all, unless they're also imported by those files.
+func Default(files []*ast.File) types.Importer {
+	imp, _ := DefaultFrom(files, "")
+	return imp
 }
 
-type importer struct{}
+func DefaultFrom(files []*ast.File, whence string) (types.Importer, error) {
+	visiblePaths := map[string]struct{}{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			if genDecl.Tok != token.IMPORT {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				path := strings.Trim(spec.(*ast.ImportSpec).Path.Value, "\"`")
+				visiblePaths[path] = struct{}{}
+			}
+		}
+	}
+
+	return newImporter(visiblePaths, whence)
+}
+
+type importer struct {
+	visiblePaths map[string]struct{}
+	imported     map[string]*types.Package
+	sgovendored  map[string]func() (*annotations.Annotation, error)
+	whence       string
+}
+
+func newImporter(visiblePaths map[string]struct{}, whence string) (*importer, error) {
+	sgovendored := map[string]func() (*annotations.Annotation, error){}
+
+	if whence != "" {
+		err := findSgovendoredPkgs(whence, sgovendored)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &importer{
+		visiblePaths: visiblePaths,
+		imported:     map[string]*types.Package{},
+		sgovendored:  sgovendored,
+		whence:       whence,
+	}, nil
+}
+
+func (imp *importer) fromPkg() types.Importer {
+	return fromPkg{fromSrc: imp, imp: goimporter.Default()}
+}
 
 func (imp *importer) Import(path string) (*types.Package, error) {
-	buildPkg, err := build.Import(path, "", build.ImportComment)
+	return imp.ImportFrom(path, imp.whence, types.ImportMode(build.ImportComment))
+}
+
+func (imp *importer) ImportFrom(path, srcDir string, mode types.ImportMode) (*types.Package, error) {
+	if imported, ok := imp.imported[path]; ok {
+		return imported, nil
+	}
+
+	if path == "unsafe" {
+		gopkg, err := goimporter.Default().Import(path)
+		if err != nil {
+			return nil, err
+		}
+		conv := &converter{gopkg: gopkg}
+		conv.convert()
+		imp.imported[path] = conv.ret
+		return conv.ret, nil
+	}
+
+	buildPkg, err := build.Import(path, srcDir, build.ImportMode(mode))
 	if err != nil {
 		return nil, err
 	}
 	fset := token.NewFileSet()
+
 	var files []*ast.File
 	for _, name := range buildPkg.GoFiles {
 		path := filepath.Join(buildPkg.Dir, name)
@@ -50,26 +124,68 @@ func (imp *importer) Import(path string) (*types.Package, error) {
 		if err != nil {
 			return nil, err
 		}
-		ConvertAST(a)
 		files = append(files, a)
+	}
+
+	// 1. Typecheck without converting anything; ConvertAST needs to know
+	//    which idents are types to perform the default conversions.
+
+	info := &types.Info{
+		Defs: map[*ast.Ident]types.Object{},
+		Uses: map[*ast.Ident]types.Object{},
 	}
 	cfg := &types.Config{
 		IgnoreFuncBodies:        true,
 		IgnoreTopLevelVarValues: true,
-		Importer:                converting{goimporter.Default()},
+		Importer:                imp.fromPkg(),
+		AllowUninitializedExprs: true,
 	}
-	pkg, err := cfg.Check(path, fset, files, &types.Info{})
+	pkg, err := cfg.Check(path, fset, files, info)
 	if err != nil {
 		return nil, err
 	}
+
+	// 2. Convert AST, now using the doc comment annotations and fromPkg
+	//    everything that hasn't been converted explicitly by then with the
+	//    default conversion (wrapping in optionals).
+
+	var ann *annotations.Annotation
+	if a, ok := defaultAnnotations[path]; ok {
+		ann = annotations.NewAnnotation(a)
+	} else if a, ok := imp.sgovendored[path]; ok {
+		ann, err = a()
+		if err != nil {
+			return nil, fmt.Errorf("reading SGo annotations for %s: %v", path, err)
+		}
+	}
+
+	for _, f := range files {
+		ConvertAST(f, info, ann)
+	}
+
+	// 3. Typecheck converted AST.
+
+	pkg, err = cfg.Check(path, fset, files, &types.Info{})
+	if err != nil {
+		return nil, err
+	}
+
+	imp.imported[path] = pkg
 	return pkg, nil
 }
 
-type converting struct {
-	imp gotypes.Importer
+type fromPkg struct {
+	fromSrc *importer
+	imp     gotypes.Importer
 }
 
-func (c converting) Import(path string) (*types.Package, error) {
+func (c fromPkg) Import(path string) (*types.Package, error) {
+	if imported, ok := c.fromSrc.imported[path]; ok {
+		return imported, nil
+	}
+	if _, ok := c.fromSrc.visiblePaths[path]; ok {
+		return c.fromSrc.Import(path)
+	}
 	gopkg, err := c.imp.Import(path)
 	if err != nil {
 		return nil, err
@@ -122,7 +238,8 @@ func (c *converter) convertPackage(v *gotypes.Package) *types.Package {
 
 func (c *converter) convertScope(dst *types.Scope, src *gotypes.Scope) {
 	for _, name := range src.Names() {
-		dst.Insert(c.convertObject(src.Lookup(name)))
+		obj := src.Lookup(name)
+		dst.Insert(c.convertObject(obj))
 	}
 	for i := 0; i < src.NumChildren(); i++ {
 		child := src.Child(i)
@@ -150,6 +267,8 @@ func (c *converter) convertObject(v gotypes.Object) types.Object {
 		ret = c.convertConst(v)
 	case *gotypes.PkgName:
 		ret = c.convertPkgName(v)
+	case *gotypes.Builtin:
+		ret = c.convertBuiltin(v)
 	default:
 		panic(fmt.Sprintf("unhandled Object %T", v))
 	}
@@ -260,6 +379,15 @@ func (c *converter) convertPkgName(v *gotypes.PkgName) *types.PkgName {
 	return ret
 }
 
+func (c *converter) convertBuiltin(v *gotypes.Builtin) *types.Builtin {
+	switch v.Name() {
+	case "Alignof", "Offsetof", "Sizeof":
+		return types.Unsafe.Scope().Lookup(v.Name()).(*types.Builtin)
+	default:
+		return types.Universe.Lookup(v.Name()).(*types.Builtin)
+	}
+}
+
 func (c *converter) convertTuple(v *gotypes.Tuple, conv func(*gotypes.Var) *types.Var) *types.Tuple {
 	if v == nil {
 		return nil
@@ -301,8 +429,9 @@ func (c *converter) convertTypeName(v *gotypes.TypeName) *types.TypeName {
 		v.Name(),
 		typ,
 	)
-	types.NewNamed(ret, nil, nil)
 	c.converted[v] = ret
+	named := types.NewNamed(ret, nil, nil)
+	c.converted[v.Type()] = named
 	return ret
 }
 
@@ -352,11 +481,8 @@ func (c *converter) convertNamed(v *gotypes.Named) *types.Named {
 	if gotypes.Universe.Lookup("error").(*gotypes.TypeName).Type().(*gotypes.Named) == v {
 		return types.Universe.Lookup("error").(*types.TypeName).Type().(*types.Named)
 	}
-	ret := types.NewNamed(
-		c.convertTypeName(v.Obj()),
-		nil,
-		nil,
-	)
+	typeName := c.convertTypeName(v.Obj())
+	ret := typeName.Type().(*types.Named)
 	c.converted[v] = ret
 	for i := 0; i < v.NumMethods(); i++ {
 		ret.AddMethod(c.convertFunc(v.Method(i)))
@@ -511,4 +637,94 @@ func (c *converter) convertConstantValue(v goconstant.Value) constant.Value {
 	}
 	c.converted[v] = ret
 	return ret
+}
+
+func findSgovendoredPkgs(whence string, sgovendored map[string]func() (*annotations.Annotation, error)) error {
+	dirPath, err := filepath.Abs(whence)
+	if err != nil {
+		return err
+	}
+
+	annPaths := map[string]string{}
+
+	for {
+		dir, err := os.Open(dirPath)
+		if err != nil {
+			return err
+		}
+		fileNames, err := dir.Readdirnames(-1)
+		dir.Close()
+		if err != nil {
+			return err
+		}
+		for _, sgovendorPath := range fileNames {
+			if sgovendorPath != "sgovendor" {
+				continue
+			}
+			sgovendorPath = filepath.Join(dirPath, sgovendorPath)
+			info, err := os.Lstat(sgovendorPath)
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				continue
+			}
+
+			filepath.Walk(sgovendorPath, func(path string, info os.FileInfo, err error) error {
+				if info.IsDir() || filepath.Ext(path) != ".sgoann" {
+					return nil
+				}
+				pkgPath := filepath.Dir(path[len(sgovendorPath)+1:])
+				if _, ok := annPaths[pkgPath]; ok {
+					return nil
+				}
+				annPaths[pkgPath] = filepath.Dir(path)
+				return nil
+			})
+		}
+
+		nextDirPath := filepath.Dir(dirPath)
+		if nextDirPath == dirPath {
+			break
+		}
+		dirPath = nextDirPath
+	}
+
+	for pkgPath, dirPath := range annPaths {
+		sgovendored[pkgPath] = func() (*annotations.Annotation, error) {
+			return readSgovendorDir(dirPath)
+		}
+	}
+
+	return nil
+}
+
+func readSgovendorDir(dirPath string) (*annotations.Annotation, error) {
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		return nil, err
+	}
+	fileNames, err := dir.Readdirnames(-1)
+	dir.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var allSrc string
+
+	for _, fileName := range fileNames {
+		if filepath.Ext(fileName) != ".sgoann" {
+			continue
+		}
+
+		// TODO: Cache this maybe?
+		src, err := ioutil.ReadFile(filepath.Join(dirPath, fileName))
+		if err != nil {
+			return nil, err
+		}
+
+		allSrc += "\n" + string(src)
+	}
+
+	return annotations.Parse(allSrc)
 }

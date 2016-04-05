@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/tcard/sgo/sgo"
@@ -31,6 +33,11 @@ func main() {
 	msgCh := make(chan msgType)
 	go func() {
 		for msg := range msgCh {
+			c := msg.c
+			if c == nil {
+				panic("c shouldn't be nil")
+			}
+			time.Sleep(1 * time.Second)
 			switch msg.Type {
 			case "format":
 				resp := &msgType{
@@ -51,7 +58,7 @@ func main() {
 						resp.Value = string(formatted)
 					}
 				}()
-				msg.c.WriteJSON(resp)
+				c.WriteJSON(resp)
 			case "translate":
 				resp := &msgType{
 					Type: "translate",
@@ -67,29 +74,31 @@ func main() {
 						}
 					}()
 					w := &bytes.Buffer{}
-					err := sgo.TranslateFile(w, strings.NewReader(msg.Value.(string)), "name")
-					if err != nil {
-						if errs, ok := err.(scanner.ErrorList); ok {
-							var errMsgs []string
-							for _, err := range errs {
+					errs := sgo.TranslateFile(func() (io.Writer, error) { return w, nil }, strings.NewReader(msg.Value.(string)), "name")
+					if errs != nil {
+						var errMsgs []string
+						for _, err := range errs {
+							if errs, ok := err.(scanner.ErrorList); ok {
+								for _, err := range errs {
+									errMsgs = append(errMsgs, err.Error())
+								}
+							} else {
 								errMsgs = append(errMsgs, err.Error())
 							}
-							resp.Value = strings.Join(errMsgs, "\n")
-						} else {
-							resp.Value = err.Error()
 						}
+						resp.Value = strings.Join(errMsgs, "\n")
 					} else {
 						resp.Value = w.String()
 					}
 				}()
-				msg.c.WriteJSON(resp)
+				c.WriteJSON(resp)
 			case "execute":
 				resp := &msgType{
 					Type: "execute",
 				}
 				body := url.Values{}
 				body.Add("version", "2")
-				var err error
+				var errs []error
 				w := &bytes.Buffer{}
 				func() {
 					defer func() {
@@ -98,14 +107,24 @@ func main() {
 							stack := make([]byte, 99999)
 							runtime.Stack(stack, false)
 							value += string(stack)
-							err = errors.New(value)
+							errs = append(errs, errors.New(value))
 						}
 					}()
 
-					err = sgo.TranslateFile(w, strings.NewReader(msg.Value.(string)), "name")
+					errs = sgo.TranslateFile(func() (io.Writer, error) { return w, nil }, strings.NewReader(msg.Value.(string)), "name")
 				}()
-				if err != nil {
-					resp.Value = err.Error()
+				if errs != nil {
+					var errMsgs []string
+					for _, err := range errs {
+						if errs, ok := err.(scanner.ErrorList); ok {
+							for _, err := range errs {
+								errMsgs = append(errMsgs, err.Error())
+							}
+						} else {
+							errMsgs = append(errMsgs, err.Error())
+						}
+					}
+					resp.Value = strings.Join(errMsgs, "\n")
 				} else {
 					body.Add("body", w.String())
 					postResp, err := http.PostForm("http://play.golang.org/compile", body)
@@ -122,7 +141,7 @@ func main() {
 						}
 					}
 				}
-				msg.c.WriteJSON(resp)
+				c.WriteJSON(resp)
 			}
 		}
 	}()
@@ -166,7 +185,9 @@ func main() {
 }
 
 type msgType struct {
-	Type  string      `json:"type"`
+	// For SGo: string
+	Type  string       `json:"type"`
+	// For SGo: ?interface{}
 	Value interface{} `json:"value"`
 	c     *websocket.Conn
 }
@@ -249,6 +270,8 @@ window.addEventListener("load", function(evt) {
 	var shareInput = document.getElementById("share-input");
 	var executed = document.getElementById("executed");
 
+	var receivedTranslation = function() {};
+
 	var ws = new WebSocket("{{.WSURL}}");
 	ws.onmessage = function(ev) {
 		var data = JSON.parse(ev.data);
@@ -278,6 +301,7 @@ window.addEventListener("load", function(evt) {
 				runButton.disabled = false;
 			}
 		} else if (data.type == "translate") {
+			receivedTranslation();
 			translated.textContent = data.value;
 		} else if (data.type == "format") {
 			if (data.value) {
@@ -309,12 +333,29 @@ window.addEventListener("load", function(evt) {
 		formatButton.disabled = true;
 	};
 
-	var translate = function() {
-		ws.send(JSON.stringify({
-			"type": "translate",
-			"value": inputCode.value,
-		}));
-	};
+	var translate = (function() {
+		var sending = false;
+		var waiting = false;
+		return function() {
+			if (sending) {
+				waiting = true;
+				return;
+			}
+
+			sending = true;
+			receivedTranslation = function() {
+				sending = false;
+				if (waiting) {
+					waiting = false;
+					translate();
+				}
+			};
+			ws.send(JSON.stringify({
+				"type": "translate",
+				"value": inputCode.value,
+			}));
+		}
+	})();
 
 	inputCode.onchange = translate;
 	inputCode.onkeyup = translate;

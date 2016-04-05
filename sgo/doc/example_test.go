@@ -6,12 +6,13 @@ package doc_test
 
 import (
 	"bytes"
+	"strings"
+	"testing"
+
 	"github.com/tcard/sgo/sgo/doc"
 	"github.com/tcard/sgo/sgo/format"
 	"github.com/tcard/sgo/sgo/parser"
 	"github.com/tcard/sgo/sgo/token"
-	"strings"
-	"testing"
 )
 
 const exampleTestFile = `

@@ -27,16 +27,17 @@ package types_test
 
 import (
 	"flag"
-	"github.com/tcard/sgo/sgo/ast"
-	"github.com/tcard/sgo/sgo/importer"
-	"github.com/tcard/sgo/sgo/parser"
-	"github.com/tcard/sgo/sgo/scanner"
-	"github.com/tcard/sgo/sgo/token"
-	"github.com/tcard/sgo/sgo/internal/testenv"
 	"io/ioutil"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/ast"
+	"github.com/tcard/sgo/sgo/importer"
+	"github.com/tcard/sgo/sgo/internal/testenv"
+	"github.com/tcard/sgo/sgo/parser"
+	"github.com/tcard/sgo/sgo/scanner"
+	"github.com/tcard/sgo/sgo/token"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
@@ -55,6 +56,7 @@ var tests = [][]string{
 	{"testdata/errors.src"},
 	{"testdata/importdecl0a.src", "testdata/importdecl0b.src"},
 	{"testdata/importdecl1a.src", "testdata/importdecl1b.src"},
+	{"testdata/importC.src"}, // special handling in checkFiles
 	{"testdata/cycles.src"},
 	{"testdata/cycles1.src"},
 	{"testdata/cycles2.src"},
@@ -87,8 +89,6 @@ var tests = [][]string{
 	{"testdata/blank.src"},
 }
 
-var fset = token.NewFileSet()
-
 // Positioned errors are of the form filename:line:column: message .
 var posMsgRx = regexp.MustCompile(`^(.*:[0-9]+:[0-9]+): *(.*)`)
 
@@ -100,6 +100,8 @@ func splitError(err error) (pos, msg string) {
 	msg = err.Error()
 	if m := posMsgRx.FindStringSubmatch(msg); len(m) == 3 {
 		pos = m[1]
+		// TODO: Use also column once we don't mess them up anymore.
+		pos = pos[:strings.LastIndex(pos, ":")]
 		msg = m[2]
 	}
 	return
@@ -170,6 +172,8 @@ func errMap(t *testing.T, testname string, files []*ast.File) map[string][]strin
 						pos = here
 					}
 					p := fset.Position(pos).String()
+					// TODO: Use also column once we don't mess them up anymore.
+					p = p[:strings.LastIndex(p, ":")]
 					errmap[p] = append(errmap[p], strings.TrimSpace(s[2]))
 				}
 			case token.SEMICOLON:
@@ -244,8 +248,12 @@ func checkFiles(t *testing.T, testfiles []string) {
 	}
 
 	// typecheck and collect typechecker errors
-	var conf Config
-	conf.Importer = importer.Default()
+	conf := Config{AllowUseUninitializedVars: true, AllowUninitializedExprs: true}
+	// special case for importC.src
+	if len(testfiles) == 1 && testfiles[0] == "testdata/importC.src" {
+		conf.FakeImportC = true
+	}
+	conf.Importer = importer.Default(files)
 	conf.Error = func(err error) {
 		if *listErrors {
 			t.Error(err)

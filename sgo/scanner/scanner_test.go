@@ -5,12 +5,13 @@
 package scanner
 
 import (
-	"github.com/tcard/sgo/sgo/token"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/token"
 )
 
 var fset = token.NewFileSet()

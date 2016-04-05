@@ -5,8 +5,9 @@
 package types_test
 
 import (
-	"github.com/tcard/sgo/sgo/parser"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/parser"
 
 	. "github.com/tcard/sgo/sgo/types"
 )

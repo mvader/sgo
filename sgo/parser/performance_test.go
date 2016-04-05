@@ -5,9 +5,10 @@
 package parser
 
 import (
-	"github.com/tcard/sgo/sgo/token"
 	"io/ioutil"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/token"
 )
 
 var src = readFile("parser.go")

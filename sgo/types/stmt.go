@@ -156,25 +156,84 @@ func (check *Checker) suspendedCall(keyword string, call *ast.CallExpr) {
 	check.errorf(x.pos(), "%s %s %s", keyword, msg, &x)
 }
 
-func (check *Checker) caseValues(x operand /* copy argument (not *operand!) */, values []ast.Expr) {
-	// No duplicate checking for now. See issue 4524.
+// goVal returns the Go value for val, or nil.
+func goVal(val constant.Value) interface{} {
+	// val should exist, but be conservative and check
+	if val == nil {
+		return nil
+	}
+	// Match implementation restriction of other compilers.
+	// gc only checks duplicates for integer, floating-point
+	// and string values, so only create Go values for these
+	// types.
+	switch val.Kind() {
+	case constant.Int:
+		if x, ok := constant.Int64Val(val); ok {
+			return x
+		}
+		if x, ok := constant.Uint64Val(val); ok {
+			return x
+		}
+	case constant.Float:
+		if x, ok := constant.Float64Val(val); ok {
+			return x
+		}
+	case constant.String:
+		return constant.StringVal(val)
+	}
+	return nil
+}
+
+// A valueMap maps a case value (of a basic Go type) to a list of positions
+// where the same case value appeared, together with the corresponding case
+// types.
+// Since two case values may have the same "underlying" value but different
+// types we need to also check the value's types (e.g., byte(1) vs myByte(1))
+// when the switch expression is of interface type.
+type (
+	valueMap  map[interface{}][]valueType // underlying Go value -> valueType
+	valueType struct {
+		pos token.Pos
+		typ Type
+	}
+)
+
+func (check *Checker) caseValues(x *operand, values []ast.Expr, seen valueMap) {
+L:
 	for _, e := range values {
-		var y operand
-		check.expr(&y, e)
-		if y.mode == invalid {
-			return
+		var v operand
+		check.expr(&v, e)
+		if x.mode == invalid || v.mode == invalid {
+			continue L
 		}
-		// TODO(gri) The convertUntyped call pair below appears in other places. Factor!
-		// Order matters: By comparing y against x, error positions are at the case values.
-		check.convertUntyped(&y, x.typ)
-		if y.mode == invalid {
-			return
+		check.convertUntyped(&v, x.typ)
+		if v.mode == invalid {
+			continue L
 		}
-		check.convertUntyped(&x, y.typ)
-		if x.mode == invalid {
-			return
+		// Order matters: By comparing v against x, error positions are at the case values.
+		res := v // keep original v unchanged
+		check.comparison(&res, x, token.EQL)
+		if res.mode == invalid {
+			continue L
 		}
-		check.comparison(&y, &x, token.EQL)
+		if v.mode != constant_ {
+			continue L // we're done
+		}
+		// look for duplicate values
+		if val := goVal(v.val); val != nil {
+			if list := seen[val]; list != nil {
+				// look for duplicate types for a given value
+				// (quadratic algorithm, but these lists tend to be very short)
+				for _, vt := range list {
+					if Identical(v.typ, vt.typ) {
+						check.errorf(v.pos(), "duplicate case %s in expression switch", &v)
+						check.error(vt.pos, "\tprevious case") // secondary error, \t indented
+						continue L
+					}
+				}
+			}
+			seen[val] = append(seen[val], valueType{v.pos(), v.typ})
+		}
 	}
 }
 
@@ -183,15 +242,19 @@ L:
 	for _, e := range types {
 		T = check.typOrNil(e)
 		if T == Typ[Invalid] {
-			continue
+			continue L
 		}
-		// complain about duplicate types
-		// TODO(gri) use a type hash to avoid quadratic algorithm
+		// look for duplicate types
+		// (quadratic algorithm, but type switches tend to be reasonably small)
 		for t, pos := range seen {
 			if T == nil && t == nil || T != nil && t != nil && Identical(T, t) {
 				// talk about "case" rather than "type" because of nil case
-				check.error(e.Pos(), "duplicate case in type switch")
-				check.errorf(pos, "\tprevious case %s", T) // secondary error, \t indented
+				Ts := "nil"
+				if T != nil {
+					Ts = T.String()
+				}
+				check.errorf(e.Pos(), "duplicate case %s in type switch", Ts)
+				check.error(pos, "\tprevious case") // secondary error, \t indented
 				continue L
 			}
 		}
@@ -259,11 +322,19 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 		if ch.mode == invalid || x.mode == invalid {
 			return
 		}
-		if tch, ok := ch.typ.Underlying().(*Chan); !ok || tch.dir == RecvOnly || !check.assignment(&x, tch.elem) {
-			if x.mode != invalid {
-				check.invalidOp(ch.pos(), "cannot send %s to channel %s", &x, &ch)
-			}
+
+		tch, ok := ch.typ.Underlying().(*Chan)
+		if !ok {
+			check.invalidOp(s.Arrow, "cannot send to non-chan type %s", ch.typ)
+			return
 		}
+
+		if tch.dir == RecvOnly {
+			check.invalidOp(s.Arrow, "cannot send to receive-only type %s", tch)
+			return
+		}
+
+		check.assignment(&x, tch.elem, "send")
 
 	case *ast.IncDecStmt:
 		var op token.Token
@@ -329,6 +400,10 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 			// function returns results
 			// (if one, say the first, result parameter is named, all of them are named)
 			if len(s.Results.List) == 0 && res.vars[0].name != "" {
+				if res.entangled != nil && isBoolean(res.entangled.typ) {
+					check.errorf(s.Pos(), "empty return statement not allowed with entangled bool return values")
+				}
+
 				// spec: "Implementation restriction: A compiler may disallow an empty expression
 				// list in a "return" statement if a different entity (constant, type, or variable)
 				// with the same name as a result parameter is in scope at the place of the return."
@@ -388,38 +463,6 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 		}
 
 		effs := check.ifCondSideEffects(x)
-		var collapsed []*Var
-
-		handleEffs := func(inElse bool) {
-			for _, eff := range effs {
-				if (!inElse && eff.isNilOrTrue) || (inElse && !eff.isNilOrTrue) {
-					sc := check.scope
-					if inElse {
-						sc = sc.Parent()
-					}
-					_, v := sc.LookupParent(eff.ident.Name, token.NoPos)
-					if v, ok := v.(*Var); ok {
-						for _, c := range v.collapses {
-							if !c.usable {
-								c.usable = true
-								if debugUsable {
-									fmt.Println("USABLE if-else unwrapped collapses:", fmt.Sprintf("(inElse: %v)", inElse), c.name, fmt.Sprintf("%p", c), c.usable)
-								}
-								collapsed = append(collapsed, c)
-							}
-						}
-					}
-				} else {
-					newVar := NewVar(-1, check.pkg, eff.ident.Name, eff.typ)
-					newVar.usable = true
-					if debugUsable {
-						fmt.Println("USABLE if-else unwrapped var:", fmt.Sprintf("(inElse: %v)", inElse), newVar.name, fmt.Sprintf("%p", newVar), newVar.usable)
-					}
-					newVar.used = true
-					check.scope.Insert(newVar)
-				}
-			}
-		}
 
 		wereUsable := map[*Var]bool{}
 		sc := check.scope.Parent()
@@ -433,11 +476,19 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 			sc = sc.Parent()
 		}
 
-		if len(effs) > 0 {
-			handleEffs(false)
-		}
+		collapsed := check.handleEffs(effs, false, check.scope)
 
 		check.stmt(inner, s.Body)
+		// The parser produces a correct AST but if it was modified
+		// elsewhere the else branch may be invalid. Check again.
+		switch s.Else.(type) {
+		case nil, *ast.BadStmt:
+			// valid or error already reported
+		case *ast.IfStmt, *ast.BlockStmt:
+			// will check below
+		default:
+			check.error(s.Else.Pos(), "invalid else branch in if statement")
+		}
 
 		usableAfterBody := map[*Var]bool{}
 		for v, wasUsable := range wereUsable {
@@ -458,10 +509,7 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 		}
 
 		if s.Else != nil {
-			collapsed = nil
-			if len(effs) > 0 {
-				handleEffs(true)
-			}
+			collapsed = check.handleEffs(effs, true, check.scope.Parent())
 
 			check.stmt(inner, s.Else)
 
@@ -469,7 +517,7 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 				if !(v.usable && usableAfterBody[v]) {
 					v.usable = wasUsable
 					if debugUsable {
-						fmt.Println("USABLE else restore usable after else:", v.name, fmt.Sprintf("%p", v), v.usable)
+						fmt.Println("USABLE else restore usable after body:", v.name, fmt.Sprintf("%p", v), v.usable)
 					}
 				}
 			}
@@ -482,6 +530,30 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 			}
 		}
 
+		if len(s.Body.List) > 0 {
+			lastStmt := s.Body.List[len(s.Body.List)-1]
+			switch lastStmt := lastStmt.(type) {
+			case *ast.ReturnStmt:
+				if debugUsable {
+					fmt.Println("USABLE if.body returns, so simulate that rest of the statements are in else")
+				}
+				check.handleEffs(effs, true, check.scope.parent)
+			case *ast.ExprStmt:
+				call, ok := lastStmt.X.(*ast.CallExpr)
+				if !ok {
+					break
+				}
+				fun, ok := call.Fun.(*ast.Ident)
+				if !ok || fun.Name != "panic" {
+					break
+				}
+				if debugUsable {
+					fmt.Println("USABLE if.body panics, so simulate that rest of the statements are in else")
+				}
+				check.handleEffs(effs, true, check.scope.parent)
+			}
+		}
+
 	case *ast.SwitchStmt:
 		inner |= breakOk
 		check.openScope(s, "switch")
@@ -491,6 +563,9 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 		var x operand
 		if s.Tag != nil {
 			check.expr(&x, s.Tag)
+			// By checking assignment of x to an invisible temporary
+			// (as a compiler would), we get all the relevant checks.
+			check.assignment(&x, nil, "switch expression")
 		} else {
 			// spec: "A missing switch expression is
 			// equivalent to the boolean value true."
@@ -502,15 +577,14 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 
 		check.multipleDefaults(s.Body.List)
 
+		seen := make(valueMap) // map of seen case values to positions and types
 		for i, c := range s.Body.List {
 			clause, _ := c.(*ast.CaseClause)
 			if clause == nil {
 				check.invalidAST(c.Pos(), "incorrect expression switch case")
 				continue
 			}
-			if x.mode != invalid {
-				check.caseValues(x, clause.List.List)
-			}
+			check.caseValues(&x, clause.List.List, seen)
 			check.openScope(clause, "case")
 			inner := inner
 			if i+1 < len(s.Body.List) {
@@ -797,7 +871,7 @@ func (check *Checker) stmt(ctxt stmtContext, s ast.Stmt) {
 					x.mode = value
 					x.expr = lhs // we don't have a better rhs expression to use here
 					x.typ = typ
-					check.initVar(obj, &x, false)
+					check.initVar(obj, &x, "range clause")
 				} else {
 					obj.typ = Typ[Invalid]
 					obj.used = true // don't complain about unused variable
@@ -863,6 +937,23 @@ func (checker *Checker) ifCondSideEffects(x operand) []ifCondSideEffect {
 				isNilOrTrue: true,
 			})
 		}
+	case *ast.UnaryExpr:
+		if v.Op != token.NOT {
+			return effs
+		}
+		id, ok := v.X.(*ast.Ident)
+		if !ok {
+			return effs
+		}
+		var op operand
+		checker.expr(&op, id)
+		if isBoolean(op.typ) {
+			effs = append(effs, ifCondSideEffect{
+				ident:       id,
+				typ:         op.typ.Underlying(),
+				isNilOrTrue: false,
+			})
+		}
 	case *ast.BinaryExpr:
 		if v.Op != token.EQL && v.Op != token.NEQ {
 			return effs
@@ -904,6 +995,42 @@ func (checker *Checker) ifCondSideEffects(x operand) []ifCondSideEffect {
 		effs = append(effs, eff)
 	}
 	return effs
+}
+
+func (check *Checker) handleEffs(effs []ifCondSideEffect, inElse bool, sc *Scope) []*Var {
+	var collapsed []*Var
+	for _, eff := range effs {
+		if (!inElse && eff.isNilOrTrue) || (inElse && !eff.isNilOrTrue) {
+			_, v := sc.LookupParent(eff.ident.Name, token.NoPos)
+			if v, ok := v.(*Var); ok {
+				for _, c := range v.collapses {
+					if !c.usable {
+						c.usable = true
+						if debugUsable {
+							fmt.Println("USABLE if-else unwrapped collapses:", fmt.Sprintf("(inElse: %v)", inElse), c.name, fmt.Sprintf("%p", c), c.usable)
+						}
+						collapsed = append(collapsed, c)
+					}
+				}
+			}
+		} else {
+			var va *Var
+			if v, ok := sc.Lookup(eff.ident.Name).(*Var); ok {
+				v.setType(eff.typ)
+				va = v
+			} else {
+				newVar := NewVar(-1, check.pkg, eff.ident.Name, eff.typ)
+				check.scope.Insert(newVar)
+				va = newVar
+			}
+			va.usable = true
+			va.used = true
+			if debugUsable {
+				fmt.Println("USABLE if-else unwrapped var:", fmt.Sprintf("(inElse: %v)", inElse), va.name, fmt.Sprintf("%p", va), va.usable)
+			}
+		}
+	}
+	return collapsed
 }
 
 func (c *Checker) isCollapserVar(id *ast.Ident) bool {

@@ -4,9 +4,10 @@
 
 package types
 
-import "sort"
-
-// TODO(gri) Revisit factory functions - make sure they have all relevant parameters.
+import (
+	"sort"
+	"sync"
+)
 
 // A Type represents a type of Go.
 // All types implement the Type interface.
@@ -131,10 +132,10 @@ func (s *Slice) Elem() Type { return s.elem }
 
 // A Struct represents a struct type.
 type Struct struct {
-	fields []*Var
-	tags   []string // field tags; nil if there are no tags
-	// TODO(gri) access to offsets is not threadsafe - fix this
-	offsets []int64 // field offsets in bytes, lazily initialized
+	fields      []*Var
+	tags        []string  // field tags; nil if there are no tags
+	offsets     []int64   // field offsets in bytes, lazily initialized
+	offsetsOnce sync.Once // for threadsafe lazy initialization of offsets
 }
 
 // NewStruct returns a new struct with the given fields and corresponding field tags.
@@ -395,7 +396,7 @@ type Chan struct {
 // A ChanDir value indicates a channel direction.
 type ChanDir int
 
-// The direction of a channel is indicated by one of the following constants.
+// The direction of a channel is indicated by one of these constants.
 const (
 	SendRecv ChanDir = iota
 	SendOnly
@@ -427,14 +428,18 @@ func NewNamed(obj *TypeName, underlying Type, methods []*Func) *Named {
 		panic("types.NewNamed: underlying type must not be *Named")
 	}
 	typ := &Named{obj: obj, underlying: underlying, methods: methods}
-	if obj.typ == nil {
-		obj.typ = typ
-	}
+	typ.SetObj(obj)
 	return typ
 }
 
 // TypeName returns the type name for the named type t.
 func (t *Named) Obj() *TypeName { return t.obj }
+func (t *Named) SetObj(obj *TypeName) {
+	if obj != nil && obj.typ == nil {
+		obj.typ = t
+	}
+	t.obj = obj
+}
 
 // NumMethods returns the number of explicit methods whose receiver is named type t.
 func (t *Named) NumMethods() int { return len(t.methods) }

@@ -40,8 +40,14 @@ func LookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 	// Thus, if we have a named pointer type, proceed with the underlying
 	// pointer type but discard the result if it is a method since we would
 	// not have found it for T (see also issue 8590).
+	//
+	// Same applies for optional wrapping pointers.
 	if t, _ := T.(*Named); t != nil {
-		if p, _ := t.underlying.(*Pointer); p != nil {
+		var t Type = t
+		if o, _ := t.Underlying().(*Optional); o != nil {
+			t = o.elem
+		}
+		if p, _ := t.Underlying().(*Pointer); p != nil {
 			obj, index, indirect = lookupFieldOrMethod(p, false, pkg, name)
 			if _, ok := obj.(*Func); ok {
 				return nil, nil, false
@@ -66,7 +72,8 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 		return // blank fields/methods are never found
 	}
 
-	typ, isPtr := deref(T)
+	typ, isOpt := deopt(T)
+	typ, isPtr := deref(typ)
 	named, _ := typ.(*Named)
 
 	// *typ where typ is an interface has no methods.
@@ -82,7 +89,7 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 
 	// Start with typ as single entry at shallowest depth.
 	// If typ is not a named type, insert a nil type instead.
-	current := []embeddedType{{named, nil, isPtr, false}}
+	current := []embeddedType{{named, nil, isPtr, isOpt, false}}
 
 	// named types that we have seen already, allocated lazily
 	var seen map[*Named]bool
@@ -118,6 +125,9 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 					if obj != nil || e.multiples {
 						return nil, index, false // collision
 					}
+					if e.opt && !isOptional(m.typ.(*Signature).recv.typ) {
+						continue
+					}
 					obj = m
 					indirect = e.indirect
 					continue // we can't have a matching field or interface method
@@ -131,7 +141,7 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 			case *Struct:
 				// look for a matching field and collect embedded types
 				for i, f := range t.fields {
-					if f.sameId(pkg, name) {
+					if !isOpt && f.sameId(pkg, name) {
 						assert(f.typ != nil)
 						index = concat(e.index, i)
 						if obj != nil || e.multiples {
@@ -153,9 +163,10 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 					if obj == nil && f.anonymous {
 						// Ignore embedded basic types - only user-defined
 						// named types can have methods or struct fields.
-						typ, isPtr := deref(f.typ)
+						typ, isOpt := deopt(f.typ)
+						typ, isPtr := deref(typ)
 						if t, _ := typ.(*Named); t != nil {
-							next = append(next, embeddedType{t, concat(e.index, i), e.indirect || isPtr, e.multiples})
+							next = append(next, embeddedType{t, concat(e.index, i), e.indirect || isPtr, isOpt, e.multiples})
 						}
 					}
 				}
@@ -181,8 +192,19 @@ func lookupFieldOrMethod(T Type, addressable bool, pkg *Package, name string) (o
 			//        contains m and the argument list can be assigned to the parameter
 			//        list of m. If x is addressable and &x's method set contains m, x.m()
 			//        is shorthand for (&x).m()".
-			if f, _ := obj.(*Func); f != nil && ptrRecv(f) && !indirect && !addressable {
-				return nil, nil, true // pointer/addressable receiver required
+			if f, _ := obj.(*Func); f != nil {
+				var isPtrRecv bool
+				if optRecv(f) {
+					unwrapped, _ := deopt(f.typ.(*Signature).recv.typ)
+					_, isPtrRecv = unwrapped.(*Pointer)
+				} else if isOpt {
+					return nil, nil, true // optional receiver required
+				} else {
+					isPtrRecv = ptrRecv(f)
+				}
+				if isPtrRecv && !indirect && !addressable {
+					return nil, nil, true // pointer/addressable receiver required
+				}
 			}
 			return
 		}
@@ -198,6 +220,7 @@ type embeddedType struct {
 	typ       *Named // nil means use the outer typ variable instead
 	index     []int  // embedded field indices, starting with index at depth 0
 	indirect  bool   // if set, there was a pointer indirection on the path to this field
+	opt       bool   // if set, typ is wrapped in an optional
 	multiples bool   // if set, typ appears multiple times at this depth
 }
 
@@ -278,9 +301,9 @@ func MissingMethod(V Type, T *Interface, static bool) (method *Func, wrongType b
 // assertableTo reports whether a value of type V can be asserted to have type T.
 // It returns (nil, false) as affirmative answer. Otherwise it returns a missing
 // method required by V and whether it is missing or just has the wrong type.
-func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, mustOptional bool) {
-	if typeMustOptional(T.Underlying()) {
-		mustOptional = true
+func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, needsOptional []Type) {
+	needsOptional = mustOptional(T.Underlying())
+	if len(needsOptional) > 0 {
 		return
 	}
 	// no static check is required if T is an interface
@@ -293,15 +316,16 @@ func assertableTo(V *Interface, T Type) (method *Func, wrongType bool, mustOptio
 	return
 }
 
-// typeMustOptional reports whether a type T recursively needs to be wrapped in an optional.
+// mustOptional reports whether a type T recursively needs to be wrapped in an optional.
 // If T is Array or Slice, the underlying type will be checked. If T is Optional, it will not
 // need to be wrapped in an optional unless the underlying type is a Map. In that case, further
 // checks are needed for the key and value type of the map.
-func typeMustOptional(T Type) bool {
+func mustOptional(T Type) []Type {
+	var needOptional []Type
 	t := T.Underlying()
 	switch t.(type) {
-	case *Pointer, *Map, *Signature, *Chan, *Interface:
-		return true
+	case *Pointer, *Map, *Signature, *Chan:
+		needOptional = append(needOptional, T)
 	case *Slice, *Array:
 		var underlying Type
 		switch t.(type) {
@@ -311,16 +335,25 @@ func typeMustOptional(T Type) bool {
 			underlying = t.(*Array).Elem()
 		}
 
-		return typeMustOptional(underlying)
+		needOptional = append(needOptional, mustOptional(underlying)...)
+	case *Struct:
+		fields := t.(*Struct).fields
+		for _, f := range fields {
+			needOptional = append(needOptional, mustOptional(f.typ)...)
+		}
 	case *Optional:
-		switch t.(*Optional).Elem().(type) {
+		switch underlying := t.(*Optional).Elem().(type) {
 		case *Map:
-			var underlying = t.(*Optional).Elem().(*Map)
-			return typeMustOptional(underlying.Key()) || typeMustOptional(underlying.Elem())
+			needOptional = append(needOptional, mustOptional(underlying.Key())...)
+			needOptional = append(needOptional, mustOptional(underlying.Elem())...)
+		case *Chan:
+			needOptional = append(needOptional, mustOptional(underlying.Elem())...)
+		case *Pointer:
+			needOptional = append(needOptional, mustOptional(underlying.Elem())...)
 		}
 	}
 
-	return false
+	return needOptional
 }
 
 // deref dereferences typ if it is a *Pointer and returns its base and true.
@@ -328,6 +361,15 @@ func typeMustOptional(T Type) bool {
 func deref(typ Type) (Type, bool) {
 	if p, _ := typ.(*Pointer); p != nil {
 		return p.base, true
+	}
+	return typ, false
+}
+
+// deopt dereferences typ if it is a *Optioanl and returns its elem and true.
+// Otherwise it returns (typ, false).
+func deopt(typ Type) (Type, bool) {
+	if p, _ := typ.(*Optional); p != nil {
+		return p.elem, true
 	}
 	return typ, false
 }

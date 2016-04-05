@@ -8,12 +8,13 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
+	"testing"
+
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/importer"
 	"github.com/tcard/sgo/sgo/parser"
 	"github.com/tcard/sgo/sgo/token"
-	"io/ioutil"
-	"testing"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
@@ -40,7 +41,7 @@ func TestHilbert(t *testing.T) {
 
 	// type-check file
 	DefPredeclaredTestFuncs() // define assert built-in
-	conf := Config{Importer: importer.Default()}
+	conf := Config{Importer: importer.Default([]*ast.File{f})}
 	_, err = conf.Check(f.Name.Name, fset, []*ast.File{f}, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -6,28 +6,41 @@ package types_test
 
 import (
 	"fmt"
-	"github.com/tcard/sgo/sgo/ast"
-	"github.com/tcard/sgo/sgo/importer"
-	"github.com/tcard/sgo/sgo/parser"
-	"github.com/tcard/sgo/sgo/token"
-	"github.com/tcard/sgo/sgo/internal/testenv"
 	"sort"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/ast"
+	"github.com/tcard/sgo/sgo/importer"
+	"github.com/tcard/sgo/sgo/internal/testenv"
+	"github.com/tcard/sgo/sgo/parser"
+	"github.com/tcard/sgo/sgo/token"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
 
 type resolveTestImporter struct {
-	importer Importer
+	importer ImporterFrom
 	imported map[string]bool
+	files    []*ast.File
 }
 
-func (imp *resolveTestImporter) Import(path string) (*Package, error) {
+func (imp *resolveTestImporter) Import(string) (*Package, error) {
+	panic("should not be called")
+}
+
+func (imp *resolveTestImporter) ImportFrom(path, srcDir string, mode ImportMode) (*Package, error) {
+	if mode != 0 {
+		panic("mode must be 0")
+	}
 	if imp.importer == nil {
-		imp.importer = importer.Default()
+		impFrom, err := importer.DefaultFrom(imp.files, srcDir)
+		if err != nil {
+			return nil, err
+		}
+		imp.importer = impFrom.(ImporterFrom)
 		imp.imported = make(map[string]bool)
 	}
-	pkg, err := imp.importer.Import(path)
+	pkg, err := imp.importer.ImportFrom(path, srcDir, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +136,12 @@ func TestResolveIdents(t *testing.T) {
 
 	// resolve and type-check package AST
 	importer := new(resolveTestImporter)
-	conf := Config{Importer: importer}
+	importer.files = files
+	conf := Config{
+		Importer:                  importer,
+		AllowUseUninitializedVars: true,
+		AllowUninitializedExprs:   true,
+	}
 	uses := make(map[*ast.Ident]Object)
 	defs := make(map[*ast.Ident]Object)
 	_, err := conf.Check("testResolveIdents", fset, files, &Info{Defs: defs, Uses: uses})

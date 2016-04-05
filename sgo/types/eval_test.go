@@ -7,13 +7,14 @@
 package types_test
 
 import (
-	"github.com/tcard/sgo/sgo/ast"
-	"github.com/tcard/sgo/sgo/importer"
-	"github.com/tcard/sgo/sgo/parser"
-	"github.com/tcard/sgo/sgo/token"
-	"github.com/tcard/sgo/sgo/internal/testenv"
 	"strings"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/ast"
+	"github.com/tcard/sgo/sgo/importer"
+	"github.com/tcard/sgo/sgo/internal/testenv"
+	"github.com/tcard/sgo/sgo/parser"
+	"github.com/tcard/sgo/sgo/token"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
@@ -48,7 +49,7 @@ func testEval(t *testing.T, fset *token.FileSet, pkg *Package, pos token.Pos, ex
 	// compare values
 	gotStr := ""
 	if gotTv.Value != nil {
-		gotStr = gotTv.Value.String()
+		gotStr = gotTv.Value.ExactString()
 	}
 	if gotStr != valStr {
 		t.Errorf("Eval(%q) got value %s, want %s", expr, gotStr, valStr)
@@ -110,7 +111,7 @@ func TestEvalPos(t *testing.T) {
 			x = a + len(s)
 			return float64(x)
 			/* true => true, untyped bool */
-			/* fmt.Println => , func(a ...interface{}) (n int, err error) */
+			/* fmt.Println => , func(a ...interface{}) (n int, err ?error) */
 			/* c => 3, untyped float */
 			/* T => , p.T */
 			/* a => , int */
@@ -161,7 +162,7 @@ func TestEvalPos(t *testing.T) {
 		files = append(files, file)
 	}
 
-	conf := Config{Importer: importer.Default()}
+	conf := Config{Importer: importer.Default(files)}
 	pkg, err := conf.Check("p", fset, files, nil)
 	if err != nil {
 		t.Fatal(err)

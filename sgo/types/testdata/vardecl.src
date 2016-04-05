@@ -31,12 +31,13 @@ var _ = 1, 2 /* ERROR "extra init expr 2" */
 var _, _ = 1 /* ERROR "assignment count mismatch" */
 var _, _, _ /* ERROR "missing init expr for _" */ = 1, 2
 
-var _ = g /* ERROR "2-valued expr" */ ()
+var _ = g /* ERROR "2-valued g" */ ()
 var _, _ = g()
 var _, _, _ = g /* ERROR "assignment count mismatch" */ ()
 
 var _ = m["foo"]
-var _, _ = m["foo"]
+var _, _ = m /* ERROR "assignment count mismatch" */ ["foo"]
+var _ \ _ = m["foo"]
 var _, _, _ = m  /* ERROR "assignment count mismatch" */ ["foo"]
 
 var _, _ int = 1, 2
@@ -50,12 +51,13 @@ var (
 	_, _ = 1 /* ERROR "assignment count mismatch" */
 	_, _, _ /* ERROR "missing init expr for _" */ = 1, 2
 
-	_ = g /* ERROR "2-valued expr" */ ()
+	_ = g /* ERROR "2-valued g" */ ()
 	_, _ = g()
 	_, _, _ = g /* ERROR "assignment count mismatch" */ ()
 
 	_ = m["foo"]
-	_, _ = m["foo"]
+	_ \ _ = m["foo"]
+	_, _ = m /* ERROR "assignment count mismatch" */ ["foo"]
 	_, _, _ = m /* ERROR "assignment count mismatch" */ ["foo"]
 
 	_, _ int = 1, 2
@@ -108,7 +110,8 @@ func (r T) _(a, b, c int) (u, v, w int) {
 	switch t /* ERROR "declared but not used" */ := t.(type) {
 	case int:
 	case float32, complex64:
-		t = nil
+		var x interface{}
+		t = x
 	}
 
 	switch t := t.(type) {

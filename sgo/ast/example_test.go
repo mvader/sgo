@@ -7,6 +7,7 @@ package ast_test
 import (
 	"bytes"
 	"fmt"
+
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/format"
 	"github.com/tcard/sgo/sgo/parser"

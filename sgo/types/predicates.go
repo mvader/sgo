@@ -76,7 +76,9 @@ func isOptional(typ Type) bool {
 	return ok
 }
 
-func isOptionable(typ Type) bool {
+// IsOptionable reports whether typ is a type that may be found wrapped in an
+// optional: an interface, map, pointer, function or channel type.
+func IsOptionable(typ Type) bool {
 	return IsInterface(typ) || isMap(typ) || isPointer(typ) || isSignature(typ) || isChan(typ)
 }
 
@@ -328,4 +330,34 @@ func defaultType(typ Type) Type {
 		}
 	}
 	return typ
+}
+
+func (check *Checker) hasZeroValue(typ Type) (has bool, paths [][]string) {
+	if check.conf.AllowUninitializedExprs {
+		return false, nil
+	}
+	has = hasZeroValue2(typ, nil, func(namestack []string) {
+		paths = append(paths, namestack)
+	})
+	return has, paths
+}
+
+func hasZeroValue2(typ Type, namestack []string, found func([]string)) bool {
+	if IsOptionable(typ) {
+		found(namestack)
+		return false
+	}
+	has := true
+	switch t := typ.Underlying().(type) {
+	case *Struct:
+		for i := 0; i < t.NumFields(); i++ {
+			f := t.Field(i)
+			if !hasZeroValue2(f.Type(), append(namestack, f.Name()), found) {
+				has = false
+			}
+		}
+	case *Array:
+		has = hasZeroValue2(t.Elem(), append(namestack, "(array elements)"), found)
+	}
+	return has
 }

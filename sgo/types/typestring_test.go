@@ -5,12 +5,13 @@
 package types_test
 
 import (
+	"testing"
+
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/importer"
+	"github.com/tcard/sgo/sgo/internal/testenv"
 	"github.com/tcard/sgo/sgo/parser"
 	"github.com/tcard/sgo/sgo/token"
-	"github.com/tcard/sgo/sgo/internal/testenv"
-	"testing"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
@@ -24,7 +25,7 @@ func makePkg(t *testing.T, src string) (*Package, error) {
 		return nil, err
 	}
 	// use the package name as package path
-	conf := Config{Importer: importer.Default()}
+	conf := Config{Importer: importer.Default([]*ast.File{file})}
 	return conf.Check(file.Name.Name, fset, []*ast.File{file}, nil)
 }
 
@@ -148,6 +149,7 @@ func TestQualifiedTypeString(t *testing.T) {
 		this *Package
 		want string
 	}{
+		{nil, nil, "<nil>"},
 		{pT, nil, "p.T"},
 		{pT, p, "T"},
 		{pT, q, "p.T"},

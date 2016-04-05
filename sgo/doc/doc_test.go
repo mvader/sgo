@@ -8,9 +8,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/tcard/sgo/sgo/parser"
-	"github.com/tcard/sgo/sgo/printer"
-	"github.com/tcard/sgo/sgo/token"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -18,6 +15,10 @@ import (
 	"strings"
 	"testing"
 	"text/template"
+
+	"github.com/tcard/sgo/sgo/parser"
+	"github.com/tcard/sgo/sgo/printer"
+	"github.com/tcard/sgo/sgo/token"
 )
 
 var update = flag.Bool("update", false, "update golden (.out) files")

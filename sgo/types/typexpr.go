@@ -33,8 +33,10 @@ func (check *Checker) ident(x *operand, e *ast.Ident, def *Named, path []*TypeNa
 		return
 	}
 
-	if v, ok := obj.(*Var); ok && !v.usable {
-		check.errorf(e.Pos(), "possibly uninitialized variable: %s", e.Name)
+	if !check.conf.AllowUseUninitializedVars {
+		if v, ok := obj.(*Var); ok && !v.usable {
+			check.errorf(e.Pos(), "possibly uninitialized variable: %s", e.Name)
+		}
 	}
 
 	check.recordUse(e, obj)
@@ -177,9 +179,13 @@ func (check *Checker) funcType(sig *Signature, recvPar *ast.FieldList, ftyp *ast
 		case 1:
 			recv = recvList[0]
 		}
-		// spec: "The receiver type must be of the form T or *T where T is a type name."
+		// spec: "The receiver type must be of the form T, *T or ?*T where T is a type name."
 		// (ignore invalid types - error was reported before)
-		if t, _ := deref(recv.typ); t != Typ[Invalid] {
+		t := recv.typ
+		if isOptional(t) {
+			t = t.Underlying().(*Optional).Elem()
+		}
+		if t, _ := deref(t); t != Typ[Invalid] {
 			var err string
 			if T, _ := t.(*Named); T != nil {
 				// spec: "The type denoted by T is called the receiver base type; it must not
@@ -280,7 +286,7 @@ func (check *Checker) typExprInternal(e ast.Expr, def *Named, path []*TypeName) 
 		typ := new(Optional)
 		def.setUnderlying(typ)
 		typ.elem = check.typ(e.Elt)
-		if !isOptionable(typ.elem) {
+		if !IsOptionable(typ.elem) {
 			check.error(e.Pos(), "optional must wrap pointer, map, channel, interface or function type")
 		}
 		return typ
@@ -394,16 +400,19 @@ func (check *Checker) arrayLength(e ast.Expr) int64 {
 		}
 		return 0
 	}
-	if !x.isInteger() {
-		check.errorf(x.pos(), "array length %s must be integer", &x)
-		return 0
+	if isUntyped(x.typ) || isInteger(x.typ) {
+		if val := constant.ToInt(x.val); val.Kind() == constant.Int {
+			if representableConst(val, check.conf, Typ[Int], nil) {
+				if n, ok := constant.Int64Val(val); ok && n >= 0 {
+					return n
+				}
+				check.errorf(x.pos(), "invalid array length %s", &x)
+				return 0
+			}
+		}
 	}
-	n, ok := constant.Int64Val(x.val)
-	if !ok || n < 0 {
-		check.errorf(x.pos(), "invalid array length %s", &x)
-		return 0
-	}
-	return n
+	check.errorf(x.pos(), "array length %s must be integer", &x)
+	return 0
 }
 
 func (check *Checker) collectParams(scope *Scope, list *ast.FieldList, variadicOk bool) (params []*Var, entangled *Var, variadic bool) {
@@ -429,16 +438,11 @@ func (check *Checker) collectParams(scope *Scope, list *ast.FieldList, variadicO
 		}
 		typ := check.typ(ftype)
 		if isEntangled {
-			switch underlying(typ).(type) {
-			case *Interface, *Map, *Chan, *Signature, *Pointer:
+			if IsOptionable(typ) {
 				typ = NewOptional(typ)
-			default:
-				if typ == Typ[Bool] {
-					break
-				}
+			} else if typ != Typ[Bool] {
 				check.error(field.Pos(), "entangled type must be interface, map, channel, function, pointer or bool")
 			}
-
 		}
 		// The parser ensures that f.Tag is nil and we don't
 		// care if a constructed AST contains a non-nil tag.
@@ -698,7 +702,8 @@ func (check *Checker) structType(styp *Struct, e *ast.StructType, path []*TypeNa
 			// anonymous field
 			name := anonymousFieldIdent(f.Type)
 			pos := f.Type.Pos()
-			t, isPtr := deref(typ)
+			t, _ := deopt(typ)
+			t, isPtr := deref(t)
 			switch t := t.(type) {
 			case *Basic:
 				if t == Typ[Invalid] {
@@ -750,6 +755,8 @@ func anonymousFieldIdent(e ast.Expr) *ast.Ident {
 		return e
 	case *ast.StarExpr:
 		return anonymousFieldIdent(e.X)
+	case *ast.OptionalType:
+		return anonymousFieldIdent(e.Elt)
 	case *ast.SelectorExpr:
 		return e.Sel
 	}

@@ -23,13 +23,14 @@
 package parser
 
 import (
-	"github.com/tcard/sgo/sgo/scanner"
-	"github.com/tcard/sgo/sgo/token"
 	"io/ioutil"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/scanner"
+	"github.com/tcard/sgo/sgo/token"
 )
 
 const testdata = "testdata"

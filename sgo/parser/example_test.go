@@ -6,6 +6,7 @@ package parser_test
 
 import (
 	"fmt"
+
 	"github.com/tcard/sgo/sgo/parser"
 	"github.com/tcard/sgo/sgo/token"
 )

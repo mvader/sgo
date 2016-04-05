@@ -22,6 +22,8 @@
 // and checks for compliance with the language specification.
 // Use Info.Types[expr].Type for the results of type inference.
 //
+// For a tutorial, see https://golang.org/s/types-tutorial.
+//
 package types // import "github.com/tcard/sgo/sgo/types"
 
 import (
@@ -50,14 +52,40 @@ func (err Error) Error() string {
 	return fmt.Sprintf("%s: %s", err.Fset.Position(err.Pos), err.Msg)
 }
 
-// An importer resolves import paths to Packages.
-// See go/importer for existing implementations.
+// An Importer resolves import paths to Packages.
+//
+// CAUTION: This interface does not support the import of locally
+// vendored packages. See https://golang.org/s/go15vendor.
+// If possible, external implementations should implement ImporterFrom.
 type Importer interface {
 	// Import returns the imported package for the given import
 	// path, or an error if the package couldn't be imported.
-	// Import is responsible for returning the same package for
-	// matching import paths.
+	// Two calls to Import with the same path return the same
+	// package.
 	Import(path string) (*Package, error)
+}
+
+// ImportMode is reserved for future use.
+type ImportMode int
+
+// An ImporterFrom resolves import paths to packages; it
+// supports vendoring per https://golang.org/s/go15vendor.
+// Use go/importer to obtain an ImporterFrom implementation.
+type ImporterFrom interface {
+	// Importer is present for backward-compatibility. Calling
+	// Import(path) is the same as calling ImportFrom(path, "", 0);
+	// i.e., locally vendored packages may not be found.
+	// The types package does not call Import if an ImporterFrom
+	// is present.
+	Importer
+
+	// ImportFrom returns the imported package for the given import
+	// path when imported by the package in srcDir, or an error
+	// if the package couldn't be imported. The mode value must
+	// be 0; it is reserved for future use.
+	// Two calls to ImportFrom with the same path and srcDir return
+	// the same package.
+	ImportFrom(path, srcDir string, mode ImportMode) (*Package, error)
 }
 
 // A Config specifies the configuration for type checking.
@@ -89,9 +117,12 @@ type Config struct {
 	// error found.
 	Error func(err error)
 
-	// Importer is called for each import declaration except when
-	// importing package "unsafe". An error is reported if an
-	// importer is needed but none was installed.
+	// An importer is used to import packages referred to from
+	// import declarations.
+	// If the installed importer implements ImporterFrom, the type
+	// checker calls ImportFrom instead of Import.
+	// The type checker reports an error if an importer is needed
+	// but none was installed.
 	Importer Importer
 
 	// If Sizes != nil, it provides the sizing functions for package unsafe.
@@ -101,6 +132,16 @@ type Config struct {
 	// If DisableUnusedImportCheck is set, packages are not checked
 	// for unused imports.
 	DisableUnusedImportCheck bool
+
+	// If AllowUninitializedExprs is set, expressions with a type that doesn't
+	// have a complete zero value are allowed to not be fully initialized.
+	// This can cause unexpected nil dereferences.
+	AllowUninitializedExprs bool
+
+	// If AllowUseUninitializedVars is set, uninitialized variables can be
+	// used as if they were initialized. This can cause unexpected nil
+	// dereferences.
+	AllowUseUninitializedVars bool
 }
 
 // Info holds result type information for a type-checked package.
@@ -147,7 +188,7 @@ type Info struct {
 	//
 	//	*ast.ImportSpec    *PkgName for dot-imports and imports without renames
 	//	*ast.CaseClause    type-specific *Var for each type switch case clause (incl. default)
-	//      *ast.Field         anonymous struct field or parameter *Var
+	//      *ast.Field         anonymous parameter *Var
 	//
 	Implicits map[ast.Node]Object
 
@@ -302,8 +343,10 @@ func (init *Initializer) String() string {
 	return buf.String()
 }
 
-// Check type-checks a package and returns the resulting package object,
-// the first error if any, and if info != nil, additional type information.
+// Check type-checks a package and returns the resulting package object and
+// the first error if any. Additionally, if info != nil, Check populates each
+// of the non-nil maps in the Info struct.
+//
 // The package is marked as complete if no errors occurred, otherwise it is
 // incomplete. See Config.Error for controlling behavior in the presence of
 // errors.
@@ -319,13 +362,13 @@ func (conf *Config) Check(path string, fset *token.FileSet, files []*ast.File, i
 // AssertableTo reports whether a value of type V can be asserted to have type T.
 func AssertableTo(V *Interface, T Type) bool {
 	m, _, mustOptional := assertableTo(V, T)
-	return m == nil && !mustOptional
+	return m == nil && len(mustOptional) == 0
 }
 
 // AssignableTo reports whether a value of type V is assignable to a variable of type T.
 func AssignableTo(V, T Type) bool {
 	x := operand{mode: value, typ: V}
-	return x.assignableTo(nil, T) // config not needed for non-constant x
+	return x.assignableTo(nil, T, nil) // config not needed for non-constant x
 }
 
 // ConvertibleTo reports whether a value of type V is convertible to a value of type T.

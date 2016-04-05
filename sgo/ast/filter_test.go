@@ -8,11 +8,12 @@ package ast_test
 
 import (
 	"bytes"
+	"testing"
+
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/format"
 	"github.com/tcard/sgo/sgo/parser"
 	"github.com/tcard/sgo/sgo/token"
-	"testing"
 )
 
 const input = `package p

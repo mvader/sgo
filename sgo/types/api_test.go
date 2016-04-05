@@ -7,15 +7,16 @@ package types_test
 import (
 	"bytes"
 	"fmt"
-	"github.com/tcard/sgo/sgo/ast"
-	"github.com/tcard/sgo/sgo/importer"
-	"github.com/tcard/sgo/sgo/parser"
-	"github.com/tcard/sgo/sgo/token"
-	"github.com/tcard/sgo/sgo/internal/testenv"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tcard/sgo/sgo/ast"
+	"github.com/tcard/sgo/sgo/importer"
+	"github.com/tcard/sgo/sgo/internal/testenv"
+	"github.com/tcard/sgo/sgo/parser"
+	"github.com/tcard/sgo/sgo/token"
 
 	. "github.com/tcard/sgo/sgo/types"
 )
@@ -27,7 +28,7 @@ func pkgFor(path, source string, info *Info) (*Package, error) {
 		return nil, err
 	}
 
-	conf := Config{Importer: importer.Default()}
+	conf := Config{Importer: importer.Default([]*ast.File{f}), AllowUseUninitializedVars: true, AllowUninitializedExprs: true}
 	return conf.Check(f.Name.Name, fset, []*ast.File{f}, info)
 }
 
@@ -54,14 +55,14 @@ func TestValuesInfo(t *testing.T) {
 		{`package a1; const _ = 0`, `0`, `untyped int`, `0`},
 		{`package a2; const _ = 'A'`, `'A'`, `untyped rune`, `65`},
 		{`package a3; const _ = 0.`, `0.`, `untyped float`, `0`},
-		{`package a4; const _ = 0i`, `0i`, `untyped complex`, `0`},
+		{`package a4; const _ = 0i`, `0i`, `untyped complex`, `(0 + 0i)`},
 		{`package a5; const _ = "foo"`, `"foo"`, `untyped string`, `"foo"`},
 
 		{`package b0; var _ = false`, `false`, `bool`, `false`},
 		{`package b1; var _ = 0`, `0`, `int`, `0`},
 		{`package b2; var _ = 'A'`, `'A'`, `rune`, `65`},
 		{`package b3; var _ = 0.`, `0.`, `float64`, `0`},
-		{`package b4; var _ = 0i`, `0i`, `complex128`, `0`},
+		{`package b4; var _ = 0i`, `0i`, `complex128`, `(0 + 0i)`},
 		{`package b5; var _ = "foo"`, `"foo"`, `string`, `"foo"`},
 
 		{`package c0a; var _ = bool(false)`, `false`, `bool`, `false`},
@@ -80,9 +81,9 @@ func TestValuesInfo(t *testing.T) {
 		{`package c3b; var _ = float32(0.)`, `float32(0.)`, `float32`, `0`},
 		{`package c3c; type T float32; var _ = T(0.)`, `T(0.)`, `c3c.T`, `0`},
 
-		{`package c4a; var _ = complex64(0i)`, `0i`, `complex64`, `0`},
-		{`package c4b; var _ = complex64(0i)`, `complex64(0i)`, `complex64`, `0`},
-		{`package c4c; type T complex64; var _ = T(0i)`, `T(0i)`, `c4c.T`, `0`},
+		{`package c4a; var _ = complex64(0i)`, `0i`, `complex64`, `(0 + 0i)`},
+		{`package c4b; var _ = complex64(0i)`, `complex64(0i)`, `complex64`, `(0 + 0i)`},
+		{`package c4c; type T complex64; var _ = T(0i)`, `T(0i)`, `c4c.T`, `(0 + 0i)`},
 
 		{`package c5a; var _ = string("foo")`, `"foo"`, `string`, `"foo"`},
 		{`package c5b; var _ = string("foo")`, `string("foo")`, `string`, `"foo"`},
@@ -97,10 +98,10 @@ func TestValuesInfo(t *testing.T) {
 		{`package e1; const _ = float32(-1e-200)`, `float32(-1e-200)`, `float32`, `0`},
 		{`package e2; const _ = float64( 1e-2000)`, `float64(1e-2000)`, `float64`, `0`},
 		{`package e3; const _ = float64(-1e-2000)`, `float64(-1e-2000)`, `float64`, `0`},
-		{`package e4; const _ = complex64( 1e-200)`, `complex64(1e-200)`, `complex64`, `0`},
-		{`package e5; const _ = complex64(-1e-200)`, `complex64(-1e-200)`, `complex64`, `0`},
-		{`package e6; const _ = complex128( 1e-2000)`, `complex128(1e-2000)`, `complex128`, `0`},
-		{`package e7; const _ = complex128(-1e-2000)`, `complex128(-1e-2000)`, `complex128`, `0`},
+		{`package e4; const _ = complex64( 1e-200)`, `complex64(1e-200)`, `complex64`, `(0 + 0i)`},
+		{`package e5; const _ = complex64(-1e-200)`, `complex64(-1e-200)`, `complex64`, `(0 + 0i)`},
+		{`package e6; const _ = complex128( 1e-2000)`, `complex128(1e-2000)`, `complex128`, `(0 + 0i)`},
+		{`package e7; const _ = complex128(-1e-2000)`, `complex128(-1e-2000)`, `complex128`, `(0 + 0i)`},
 
 		{`package f0 ; var _ float32 =  1e-200`, `1e-200`, `float32`, `0`},
 		{`package f1 ; var _ float32 = -1e-200`, `-1e-200`, `float32`, `0`},
@@ -108,12 +109,12 @@ func TestValuesInfo(t *testing.T) {
 		{`package f3a; var _ float64 = -1e-2000`, `-1e-2000`, `float64`, `0`},
 		{`package f2b; var _         =  1e-2000`, `1e-2000`, `float64`, `0`},
 		{`package f3b; var _         = -1e-2000`, `-1e-2000`, `float64`, `0`},
-		{`package f4 ; var _ complex64  =  1e-200 `, `1e-200`, `complex64`, `0`},
-		{`package f5 ; var _ complex64  = -1e-200 `, `-1e-200`, `complex64`, `0`},
-		{`package f6a; var _ complex128 =  1e-2000i`, `1e-2000i`, `complex128`, `0`},
-		{`package f7a; var _ complex128 = -1e-2000i`, `-1e-2000i`, `complex128`, `0`},
-		{`package f6b; var _            =  1e-2000i`, `1e-2000i`, `complex128`, `0`},
-		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `0`},
+		{`package f4 ; var _ complex64  =  1e-200 `, `1e-200`, `complex64`, `(0 + 0i)`},
+		{`package f5 ; var _ complex64  = -1e-200 `, `-1e-200`, `complex64`, `(0 + 0i)`},
+		{`package f6a; var _ complex128 =  1e-2000i`, `1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f7a; var _ complex128 = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f6b; var _            =  1e-2000i`, `1e-2000i`, `complex128`, `(0 + 0i)`},
+		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
 	}
 
 	for _, test := range tests {
@@ -143,7 +144,7 @@ func TestValuesInfo(t *testing.T) {
 		}
 
 		// check that value is correct
-		if got := tv.Value.String(); got != test.val {
+		if got := tv.Value.ExactString(); got != test.val {
 			t.Errorf("package %s: got value %s; want %s", name, got, test.val)
 		}
 	}
@@ -162,12 +163,8 @@ func TestTypesInfo(t *testing.T) {
 		{`package b3; var x interface{} = 0i`, `0i`, `complex128`},
 		{`package b4; var x interface{} = "foo"`, `"foo"`, `string`},
 
-		// comma-ok expressions
-		{`package p0; var x interface{}; var _, _ = x.(int)`,
-			`x.(int)`,
-			`(int, bool)`,
-		},
-		{`package p1; var x interface{}; func _() { _, _ = x.(int) }`,
+		// backslash-ok expressions
+		{`package p1; var x interface{}; func _() { _ \ _ = x.(int) }`,
 			`x.(int)`,
 			`(int, bool)`,
 		},
@@ -181,55 +178,55 @@ func TestTypesInfo(t *testing.T) {
 			`m["foo"]`,
 			`(complex128, bool)`,
 		},
-		{`package p3; var c chan string; var _, _ = <-c`,
+		{`package p3; var c chan string; func _() { _ \ _ = <-c }`,
 			`<-c`,
 			`(string, bool)`,
 		},
 
 		// issue 6796
-		{`package issue6796_a; var x interface{}; var _, _ = (x.(int))`,
+		{`package issue6796_a; var x interface{}; func _() { _ \ _ = (x.(int)) }`,
 			`x.(int)`,
 			`(int, bool)`,
 		},
-		{`package issue6796_b; var c chan string; var _, _ = (<-c)`,
+		{`package issue6796_b; var c chan string; func _() { _ \ _ = (<-c) }`,
 			`(<-c)`,
 			`(string, bool)`,
 		},
-		{`package issue6796_c; var c chan string; var _, _ = (<-c)`,
+		{`package issue6796_c; var c chan string; func _() { _ \ _ = (<-c) }`,
 			`<-c`,
 			`(string, bool)`,
 		},
-		{`package issue6796_d; var c chan string; var _, _ = ((<-c))`,
+		{`package issue6796_d; var c chan string; func _() { _ \ _ = ((<-c)) }`,
 			`(<-c)`,
 			`(string, bool)`,
 		},
-		{`package issue6796_e; func f(c chan string) { _, _ = ((<-c)) }`,
+		{`package issue6796_e; func f(c chan string) { _ \ _ = ((<-c)) }`,
 			`(<-c)`,
 			`(string, bool)`,
 		},
 
 		// issue 7060
-		{`package issue7060_a; var ( m map[int]string; x, ok = m[0] )`,
+		{`package issue7060_a; var ( m map[int]string ); func _() { _ \ _ = m[0] }`,
 			`m[0]`,
 			`(string, bool)`,
 		},
-		{`package issue7060_b; var ( m map[int]string; x, ok interface{} = m[0] )`,
+		// {`package issue7060_b; var ( m map[int]string; x, ok interface{} = m[0] )`,
+		// 	`m[0]`,
+		// 	`(string, bool)`,
+		// },
+		{`package issue7060_c; func f(x interface{}, ok bool, m map[int]string) { x \ ok = m[0] }`,
 			`m[0]`,
 			`(string, bool)`,
 		},
-		{`package issue7060_c; func f(x interface{}, ok bool, m map[int]string) { x, ok = m[0] }`,
-			`m[0]`,
-			`(string, bool)`,
-		},
-		{`package issue7060_d; var ( ch chan string; x, ok = <-ch )`,
-			`<-ch`,
-			`(string, bool)`,
-		},
-		{`package issue7060_e; var ( ch chan string; x, ok interface{} = <-ch )`,
-			`<-ch`,
-			`(string, bool)`,
-		},
-		{`package issue7060_f; func f(x interface{}, ok bool, ch chan string) { x, ok = <-ch }`,
+		// {`package issue7060_d; var ( ch chan string; x, ok = <-ch )`,
+		// 	`<-ch`,
+		// 	`(string, bool)`,
+		// },
+		// {`package issue7060_e; var ( ch chan string; x, ok interface{} = <-ch )`,
+		// 	`<-ch`,
+		// 	`(string, bool)`,
+		// },
+		{`package issue7060_f; func f(x interface{}, ok bool, ch chan string) { x \ ok = <-ch }`,
 			`<-ch`,
 			`(string, bool)`,
 		},
@@ -316,8 +313,8 @@ func TestPredicatesInfo(t *testing.T) {
 		{`package v1; var _ = &[]int{1}`, `([]int literal)`, `value`},
 		{`package v2; var _ = func(){}`, `(func() literal)`, `value`},
 		{`package v4; func f() { _ = f }`, `f`, `value`},
-		{`package v3; var _ *int = nil`, `nil`, `value, nil`},
-		{`package v3; var _ *int = (nil)`, `(nil)`, `value, nil`},
+		{`package v3; var _ ?*int = nil`, `nil`, `value, nil`},
+		{`package v3; var _ ?*int = (nil)`, `(nil)`, `value, nil`},
 
 		// addressable (and thus assignable) operands
 		{`package a0; var (x int; _ = x)`, `x`, `value, addressable, assignable`},
@@ -332,11 +329,11 @@ func TestPredicatesInfo(t *testing.T) {
 
 		// assignable but not addressable values
 		{`package s0; var (m map[int]int; _ = m[0])`, `m[0]`, `value, assignable, hasOk`},
-		{`package s1; var (m map[int]int; _, _ = m[0])`, `m[0]`, `value, assignable, hasOk`},
+		{`package s1; var (m map[int]int;); func _() { _ \ _ = m[0] }`, `m[0]`, `value, assignable, hasOk`},
 
 		// hasOk expressions
 		{`package k0; var (ch chan int; _ = <-ch)`, `<-ch`, `value, hasOk`},
-		{`package k1; var (ch chan int; _, _ = <-ch)`, `<-ch`, `value, hasOk`},
+		{`package k1; var (ch chan int;); func _() { _, _ = <-ch }`, `<-ch`, `value, hasOk`},
 
 		// missing entries
 		// - package names are collected in the Uses map
@@ -515,9 +512,9 @@ func TestInitOrderInfo(t *testing.T) {
 		{`package p4; var (a = 0; x = y; y = z; z = 0)`, []string{
 			"a = 0", "z = 0", "y = z", "x = y",
 		}},
-		{`package p5; var (a, _ = m[0]; m map[int]string)`, []string{
-			"a, _ = m[0]", // blank var
-		}},
+		// {`package p5; var (a, _ = m[0]; m map[int]string)`, []string{
+		// 	"a, _ = m[0]", // blank var
+		// }},
 		{`package p6; var a, b = f(); func f() (_, _ int) { return z, z }; var z = 0`, []string{
 			"z = 0", "a, b = f()",
 		}},
@@ -538,9 +535,9 @@ func TestInitOrderInfo(t *testing.T) {
 		}},
 		// emit an initializer for n:1 initializations only once (not for each node
 		// on the lhs which may appear in different order in the dependency graph)
-		{`package p12; var (a = x; b = 0; x, y = m[0]; m map[int]int)`, []string{
-			"b = 0", "x, y = m[0]", "a = x",
-		}},
+		// {`package p12; var (a = x; b = 0; x, y = m[0]; m map[int]int)`, []string{
+		// 	"b = 0", "x, y = m[0]", "a = x",
+		// }},
 		// test case from spec section on package initialization
 		{`package p12
 
@@ -679,7 +676,7 @@ func TestSelection(t *testing.T) {
 
 	fset := token.NewFileSet()
 	imports := make(testImporter)
-	conf := Config{Importer: imports}
+	conf := Config{Importer: imports, AllowUninitializedExprs: true, AllowUseUninitializedVars: true}
 	makePkg := func(path, src string) {
 		f, err := parser.ParseFile(fset, path+".go", src, 0)
 		if err != nil {
@@ -797,7 +794,7 @@ func main() {
 	makePkg("main", mainSrc)
 
 	for e, sel := range selections {
-		sel.String() // assertion: must not panic
+		_ = sel.String() // assertion: must not panic
 
 		start := fset.Position(e.Pos()).Offset
 		end := fset.Position(e.End()).Offset

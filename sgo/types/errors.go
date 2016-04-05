@@ -8,9 +8,10 @@ package types
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/tcard/sgo/sgo/ast"
 	"github.com/tcard/sgo/sgo/token"
-	"strings"
 )
 
 func assert(p bool) {
@@ -75,6 +76,15 @@ func (check *Checker) err(pos token.Pos, msg string, soft bool) {
 	if f == nil {
 		panic(bailout{}) // report only first error
 	}
+
+	if check.reportedErrs == nil {
+		check.reportedErrs = map[string]struct{}{}
+	}
+	errMsg := err.Error()
+	if _, ok := check.reportedErrs[errMsg]; ok {
+		return
+	}
+	check.reportedErrs[errMsg] = struct{}{}
 	f(err)
 }
 
@@ -84,6 +94,16 @@ func (check *Checker) error(pos token.Pos, msg string) {
 
 func (check *Checker) errorf(pos token.Pos, format string, args ...interface{}) {
 	check.err(pos, check.sprintf(format, args...), false)
+}
+
+func (check *Checker) errorHasZeroValuePaths(pos token.Pos, paths [][]string) {
+	for _, path := range paths {
+		joined := ""
+		if len(path) > 0 {
+			joined = " of field " + strings.Join(path, ".")
+		}
+		check.errorf(pos, "type%s doesn't have a zero value; must be explicitly initialized", joined)
+	}
 }
 
 func (check *Checker) softErrorf(pos token.Pos, format string, args ...interface{}) {

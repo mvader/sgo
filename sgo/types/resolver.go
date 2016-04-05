@@ -6,7 +6,6 @@ package types
 
 import (
 	"fmt"
-	pathLib "path"
 	"strconv"
 	"strings"
 	"unicode"
@@ -18,11 +17,12 @@ import (
 
 // A declInfo describes a package-level const, type, var, or func declaration.
 type declInfo struct {
-	file  *Scope        // scope of file containing this declaration
-	lhs   []*Var        // lhs of n:1 variable declarations, or nil
-	typ   ast.Expr      // type, or nil
-	init  ast.Expr      // init expression, or nil
-	fdecl *ast.FuncDecl // func declaration, or nil
+	file         *Scope // scope of file containing this declaration
+	lhs          []*Var // lhs of n:1 variable declarations, or nil
+	entangledLhs *Var
+	typ          ast.Expr      // type, or nil
+	init         ast.Expr      // init expression, or nil
+	fdecl        *ast.FuncDecl // func declaration, or nil
 
 	deps map[Object]bool // type and init dependencies; lazily allocated
 	mark int             // for dependency analysis
@@ -49,10 +49,13 @@ func (d *declInfo) addDep(obj Object) {
 // decls, init is the value spec providing the init exprs; for
 // var decls, init is nil (the init exprs are in s in this case).
 func (check *Checker) arityMatch(s, init *ast.ValueSpec) {
-	l := len(s.Names)
+	l := len(s.Names.List)
 	r := len(s.Values.List)
 	if init != nil {
-		r = len(init.Values.List)
+		r = 0
+		if init.Values != nil {
+			r = len(init.Values.List)
+		}
 	}
 
 	switch {
@@ -73,7 +76,7 @@ func (check *Checker) arityMatch(s, init *ast.ValueSpec) {
 			// TODO(gri) avoid declared but not used error here
 		}
 	case l > r && (init != nil || r != 1):
-		n := s.Names[r]
+		n := s.Names.List[r]
 		check.errorf(n.Pos(), "missing init expr for %s", n)
 	}
 }
@@ -135,6 +138,20 @@ func (check *Checker) collectObjects() {
 		pkgImports[imp] = true
 	}
 
+	// srcDir is the directory used by the Importer to look up packages.
+	// The typechecker itself doesn't need this information so it is not
+	// explicitly provided. Instead, we extract it from position info of
+	// the source files as needed.
+	// This is the only place where the type-checker (just the importer)
+	// needs to know the actual source location of a file.
+	// TODO(gri) can we come up with a better API instead?
+	var srcDir string
+	if len(check.files) > 0 {
+		// FileName may be "" (typically for tests) in which case
+		// we get "." as the srcDir which is what we would want.
+		srcDir = dir(check.fset.Position(check.files[0].Name.Pos()).Filename)
+	}
+
 	for fileNo, file := range check.files {
 		// The package identifier denotes the current package,
 		// but there is no corresponding package object.
@@ -171,17 +188,20 @@ func (check *Checker) collectObjects() {
 							// TODO(gri) shouldn't create a new one each time
 							imp = NewPackage("C", "C")
 							imp.fake = true
-						} else if path == "unsafe" {
-							// package "unsafe" is known to the language
-							imp = Unsafe
 						} else {
-							if importer := check.conf.Importer; importer != nil {
+							// ordinary import
+							if importer := check.conf.Importer; importer == nil {
+								err = fmt.Errorf("Config.Importer not installed")
+							} else if importerFrom, ok := importer.(ImporterFrom); ok {
+								imp, err = importerFrom.ImportFrom(path, srcDir, 0)
+								if imp == nil && err == nil {
+									err = fmt.Errorf("Config.Importer.ImportFrom(%s, %s, 0) returned nil but no error", path, pkg.path)
+								}
+							} else {
 								imp, err = importer.Import(path)
 								if imp == nil && err == nil {
 									err = fmt.Errorf("Config.Importer.Import(%s) returned nil but no error", path)
 								}
-							} else {
-								err = fmt.Errorf("Config.Importer not installed")
 							}
 							if err != nil {
 								check.errorf(s.Path.Pos(), "could not import %s (%s)", path, err)
@@ -203,6 +223,11 @@ func (check *Checker) collectObjects() {
 						name := imp.name
 						if s.Name != nil {
 							name = s.Name.Name
+							if path == "C" {
+								// match cmd/compile (not prescribed by spec)
+								check.errorf(s.Name.Pos(), `cannot rename import "C"`)
+								continue
+							}
 							if name == "init" {
 								check.errorf(s.Name.Pos(), "cannot declare init - must be func")
 								continue
@@ -215,6 +240,11 @@ func (check *Checker) collectObjects() {
 							check.recordDef(s.Name, obj)
 						} else {
 							check.recordImplicit(s, obj)
+						}
+
+						if path == "C" {
+							// match cmd/compile (not prescribed by spec)
+							obj.used = true
 						}
 
 						// add import to file scope
@@ -256,11 +286,11 @@ func (check *Checker) collectObjects() {
 							}
 
 							// declare all constants
-							for i, name := range s.Names {
+							for i, name := range s.Names.List {
 								obj := NewConst(name.Pos(), pkg, name.Name, nil, constant.MakeInt64(int64(iota)))
 
 								var init ast.Expr
-								if i < len(last.Values.List) {
+								if last.Values != nil && i < len(last.Values.List) {
 									init = last.Values.List[i]
 								}
 
@@ -271,7 +301,11 @@ func (check *Checker) collectObjects() {
 							check.arityMatch(s, last)
 
 						case token.VAR:
-							lhs := make([]*Var, len(s.Names))
+							lhsLen := len(s.Names.List)
+							if s.Names.EntangledPos > 0 {
+								lhsLen--
+							}
+							lhs := make([]*Var, lhsLen)
 							// If there's exactly one rhs initializer, use
 							// the same declInfo d1 for all lhs variables
 							// so that each lhs variable depends on the same
@@ -285,9 +319,8 @@ func (check *Checker) collectObjects() {
 							}
 
 							// declare all variables
-							for i, name := range s.Names {
+							for i, name := range s.Names.List {
 								obj := NewVar(name.Pos(), pkg, name.Name, nil)
-								lhs[i] = obj
 
 								d := d1
 								if d == nil {
@@ -297,6 +330,12 @@ func (check *Checker) collectObjects() {
 										init = s.Values.List[i]
 									}
 									d = &declInfo{file: fileScope, typ: s.Type, init: init}
+								}
+
+								if s.Names.EntangledPos > 0 && i == s.Names.EntangledPos-1 {
+									d.entangledLhs = obj
+								} else {
+									lhs[i] = obj
 								}
 
 								check.declarePkgObj(name, obj, d)
@@ -342,6 +381,9 @@ func (check *Checker) collectObjects() {
 					// functions.
 					if list := d.Recv.List; len(list) > 0 {
 						typ := list[0].Type
+						if opt, _ := typ.(*ast.OptionalType); opt != nil {
+							typ = opt.Elt
+						}
 						if ptr, _ := typ.(*ast.StarExpr); ptr != nil {
 							typ = ptr.X
 						}
@@ -426,7 +468,7 @@ func (check *Checker) unusedImports() {
 				// since _ identifiers are not entered into scopes.
 				if !obj.used {
 					path := obj.imported.path
-					base := pathLib.Base(path)
+					base := pkgName(path)
 					if obj.name == base {
 						check.softErrorf(obj.pos, "%q imported but not used", path)
 					} else {
@@ -443,4 +485,24 @@ func (check *Checker) unusedImports() {
 			check.softErrorf(pos, "%q imported but not used", pkg.path)
 		}
 	}
+}
+
+// pkgName returns the package name (last element) of an import path.
+func pkgName(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	return path
+}
+
+// dir makes a good-faith attempt to return the directory
+// portion of path. If path is empty, the result is ".".
+// (Per the go/build package dependency tests, we cannot import
+// path/filepath and simply use filepath.Dir.)
+func dir(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i > 0 {
+		return path[:i]
+	}
+	// i <= 0
+	return "."
 }

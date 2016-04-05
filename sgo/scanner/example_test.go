@@ -6,6 +6,7 @@ package scanner_test
 
 import (
 	"fmt"
+
 	"github.com/tcard/sgo/sgo/scanner"
 	"github.com/tcard/sgo/sgo/token"
 )
